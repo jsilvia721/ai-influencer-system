@@ -1,0 +1,1 @@
+{"statusCode": 200, "body": "{\"job_id\": \"c3e680d6-209d-4bbd-bb46-7a55c501ccc7\", \"status\": \"processing\", \"message\": \"Training image generation started for Emma\", \"estimated_completion_minutes\": 15, \"total_images\": 25}"}

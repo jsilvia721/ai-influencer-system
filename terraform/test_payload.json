@@ -1,0 +1,12 @@
+{
+  "httpMethod": "GET",
+  "path": "/characters",
+  "queryStringParameters": null,
+  "body": null,
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "requestContext": {
+    "requestId": "test-request-id"
+  }
+}

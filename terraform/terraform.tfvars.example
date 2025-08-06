@@ -1,0 +1,29 @@
+# Terraform Variables for AI Training Infrastructure
+# Copy this file to terraform.tfvars and customize the values
+
+# AWS Configuration
+aws_region = "us-east-1"  # Change to your preferred region
+
+# Project Configuration
+project_name = "ai-influencer-training"
+
+# Instance Configuration
+instance_type = "g4dn.xlarge"    # Options: g4dn.xlarge, g4dn.2xlarge, p3.2xlarge
+max_spot_price = "0.50"          # Maximum price you're willing to pay per hour
+
+# Training Configuration
+training_duration_hours = 4      # Expected training time
+
+# Security Configuration
+key_pair_name = "your-key-pair-name"     # REQUIRED: Your AWS EC2 Key Pair name
+allowed_cidr_blocks = ["0.0.0.0/0"]      # Restrict to your IP for better security
+
+# Instance Type Recommendations:
+# - g4dn.xlarge:  ~$0.20-0.40/hr spot, 16GB GPU RAM, Good for most LoRA training
+# - g4dn.2xlarge: ~$0.40-0.80/hr spot, 16GB GPU RAM, Faster training
+# - p3.2xlarge:   ~$0.60-1.20/hr spot, 16GB GPU RAM, High performance
+# 
+# Cost Optimization Tips:
+# - Use us-east-1 region for cheapest spot prices
+# - Set max_spot_price to 70% of on-demand price
+# - Monitor spot price history in AWS console

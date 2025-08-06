@@ -1,0 +1,65 @@
+# AI Influencer System Configuration
+
+# Model Settings
+models:
+  stable_diffusion:
+    model_id: "runwayml/stable-diffusion-v1-5"
+    device: "cuda"  # or "mps" for Mac M1/M2, "cpu" for CPU only
+    precision: "fp16"
+  
+  stable_video_diffusion:
+    model_id: "stabilityai/stable-video-diffusion-img2vid-xt"
+    device: "cuda"
+    precision: "fp16"
+    num_frames: 25
+    fps: 7
+
+# LoRA Settings
+lora:
+  trigger_word: "sofia woman"  # Updated for Sofia character
+  strength: 1.0
+  models_path: "./data/loras/"
+
+# Image Generation
+image_generation:
+  width: 768
+  height: 768
+  num_inference_steps: 20
+  guidance_scale: 7.5
+  num_images_per_prompt: 1
+  seed: null  # null for random, set number for reproducible results
+
+# Video Generation
+video_generation:
+  width: 576
+  height: 1024  # Portrait format for social media
+  num_frames: 25
+  fps: 7
+  motion_bucket_id: 127
+  noise_aug_strength: 0.02
+
+# Storage
+storage:
+  local:
+    base_path: "./data/"
+    images_path: "./data/images/"
+    videos_path: "./data/video_clips/"
+    loras_path: "./data/loras/"
+    final_videos_path: "./data/final_videos/"
+  
+  aws:  # Optional S3 configuration
+    bucket_name: ""
+    region: "us-east-1"
+    access_key_id: ""  # Use environment variables in production
+    secret_access_key: ""  # Use environment variables in production
+
+# API Settings
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+
+# Logging
+logging:
+  level: "INFO"
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{function}:{line} - {message}"

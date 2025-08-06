@@ -1,0 +1,24 @@
+# Enhanced Terraform Variables for AI Influencer System
+# Copy this file to terraform.tfvars and update with your values
+
+# AWS Configuration
+aws_region             = "us-east-1"
+project_name          = "ai-influencer-system"
+environment           = "dev"
+owner                 = "ai-team"
+
+# EC2 Key Pair (must exist in your AWS account)
+key_pair_name = "your-key-pair-name"  # UPDATE THIS
+
+# Notification Settings
+notification_email = "your-email@example.com"  # UPDATE THIS
+
+# Security Settings
+allowed_cidr_blocks = ["0.0.0.0/0"]  # Restrict to your IP for production: ["YOUR_IP/32"]
+
+# Character Configuration
+max_characters           = 5
+daily_posts_per_character = 2
+
+# Instance Configuration
+spot_instance_max_price = "0.50"  # Maximum price per hour for spot instances

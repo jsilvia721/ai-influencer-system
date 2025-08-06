@@ -1,0 +1,9 @@
+1. Put 15-25 photos in the photos/ directory
+2. Run: ./scripts/prepare_dataset.py photos/ training_data/
+3. The script will:
+   - Resize images to 512x512
+   - Create proper folder structure for training
+   - Generate caption files
+   - Validate image quality
+4. Use the processed data for LoRA training
+5. Put final .safetensors file in data/loras/

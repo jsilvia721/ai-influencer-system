@@ -1,0 +1,50 @@
+# Docker-optimized requirements for AI Influencer System
+# These are tested packages that work well in Docker containers
+
+# Core ML and AI dependencies
+torch>=2.0.0
+torchvision
+torchaudio
+transformers>=4.30.0
+diffusers>=0.20.0
+accelerate
+
+# Image and video processing
+opencv-python-headless  # Headless version for Docker
+pillow>=9.0.0
+numpy
+scipy
+
+# Video processing
+# Note: moviepy can be problematic in Docker, so we'll install it with specific dependencies
+moviepy
+ffmpeg-python
+imageio
+imageio-ffmpeg
+
+# AWS and cloud services (optional)
+boto3
+botocore
+
+# API and web framework
+fastapi
+uvicorn[standard]
+requests
+httpx
+
+# Data processing
+pandas
+pydantic
+python-multipart
+
+# Utilities
+python-dotenv
+click
+tqdm
+loguru
+pyyaml
+safetensors
+
+# Development and testing
+pytest
+pytest-asyncio

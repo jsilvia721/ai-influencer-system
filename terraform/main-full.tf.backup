@@ -1,0 +1,572 @@
+# Enhanced AWS Infrastructure for AI Social Media Influencer System
+# Complete production-ready infrastructure with cost optimization and parallel processing
+
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.1"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+  
+  default_tags {
+    tags = {
+      Project     = var.project_name
+      Environment = var.environment
+      ManagedBy   = "terraform"
+      Owner       = var.owner
+    }
+  }
+}
+
+# Variables
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "project_name" {
+  description = "Project name for resource naming"
+  type        = string
+  default     = "ai-influencer-system"
+}
+
+variable "environment" {
+  description = "Environment (dev, staging, prod)"
+  type        = string
+  default     = "dev"
+}
+
+variable "owner" {
+  description = "Project owner/team"
+  type        = string
+  default     = "ai-team"
+}
+
+variable "max_characters" {
+  description = "Maximum number of AI characters to support"
+  type        = number
+  default     = 5
+}
+
+variable "daily_posts_per_character" {
+  description = "Number of posts per character per day"
+  type        = number
+  default     = 2
+}
+
+variable "spot_instance_max_price" {
+  description = "Maximum spot price for GPU instances"
+  type        = string
+  default     = "0.50"
+}
+
+variable "key_pair_name" {
+  description = "EC2 Key Pair name for SSH access"
+  type        = string
+}
+
+variable "allowed_cidr_blocks" {
+  description = "CIDR blocks allowed to access resources"
+  type        = list(string)
+  default     = ["0.0.0.0/0"]  # Restrict in production
+}
+
+variable "notification_email" {
+  description = "Email address for notifications and alerts"
+  type        = string
+  default     = "admin@example.com"
+}
+
+# Data sources
+data "aws_caller_identity" "current" {}
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# Random suffix for unique naming
+resource "random_string" "suffix" {
+  length  = 8
+  special = false
+  upper   = false
+}
+
+# Local values for resource naming
+locals {
+  name_prefix = "${var.project_name}-${var.environment}"
+  resource_suffix = random_string.suffix.result
+  
+  common_tags = {
+    Project     = var.project_name
+    Environment = var.environment
+    ManagedBy   = "terraform"
+    Owner       = var.owner
+  }
+}
+
+# Networking Module
+module "networking" {
+  source = "./modules/networking"
+  
+  name_prefix = local.name_prefix
+  vpc_cidr    = "10.0.0.0/16"
+  azs         = slice(data.aws_availability_zones.available.names, 0, 3)
+  
+  # Subnets
+  public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+  database_subnet_cidrs = ["10.0.21.0/24", "10.0.22.0/24", "10.0.23.0/24"]
+  
+  tags = local.common_tags
+}
+
+# Security Module
+module "security" {
+  source = "./modules/security"
+  
+  name_prefix = local.name_prefix
+  vpc_id      = module.networking.vpc_id
+  allowed_cidr_blocks = var.allowed_cidr_blocks
+  
+  tags = local.common_tags
+}
+
+# Storage Module
+module "storage" {
+  source = "./modules/storage"
+  
+  name_prefix     = local.name_prefix
+  resource_suffix = local.resource_suffix
+  
+  # S3 bucket configuration
+  enable_versioning = true
+  lifecycle_rules = [
+    {
+      id     = "cleanup_old_content"
+      status = "Enabled"
+      expiration = {
+        days = 90
+      }
+      noncurrent_version_expiration = {
+        days = 30
+      }
+    },
+    {
+      id     = "transition_to_ia"
+      status = "Enabled"
+      transition = {
+        days          = 30
+        storage_class = "STANDARD_IA"
+      }
+    }
+  ]
+  
+  tags = local.common_tags
+}
+
+# Database Module
+module "database" {
+  source = "./modules/database"
+  
+  name_prefix = local.name_prefix
+  vpc_id      = module.networking.vpc_id
+  subnet_ids  = module.networking.database_subnet_ids
+  security_group_ids = [module.security.database_security_group_id]
+  
+  # RDS Configuration
+  engine         = "postgres"
+  engine_version = "15.8"
+  instance_class = "db.t3.micro"  # Start small, can scale up
+  allocated_storage = 20
+  max_allocated_storage = 100
+  
+  db_name  = "ai_influencer_db"
+  username = "ai_admin"
+  
+  backup_retention_period = 7
+  backup_window          = "03:00-04:00"
+  maintenance_window     = "sun:04:00-sun:05:00"
+  
+  tags = local.common_tags
+}
+
+# Compute Module
+module "compute" {
+  source = "./modules/compute"
+  
+  name_prefix = local.name_prefix
+  vpc_id      = module.networking.vpc_id
+  public_subnet_ids  = module.networking.public_subnet_ids
+  private_subnet_ids = module.networking.private_subnet_ids
+  
+  security_group_ids = [
+    module.security.api_security_group_id,
+    module.security.compute_security_group_id
+  ]
+  
+  key_pair_name = var.key_pair_name
+  s3_bucket_name = module.storage.primary_bucket_name
+  
+  # ECS Configuration
+  max_characters = var.max_characters
+  daily_posts_per_character = var.daily_posts_per_character
+  
+  # GPU instances for model training
+  gpu_instance_type = "g4dn.xlarge"
+  spot_max_price   = var.spot_instance_max_price
+  
+  # Security module outputs
+  ecs_task_execution_role_arn = module.security.ecs_task_execution_role_arn
+  ecs_task_role_arn = module.security.ecs_task_role_arn
+  ec2_instance_profile_name = module.security.ec2_instance_profile_name
+  
+  tags = local.common_tags
+}
+
+# Monitoring Module
+module "monitoring" {
+  source = "./modules/monitoring"
+  
+  name_prefix = local.name_prefix
+  
+  # Resources to monitor
+  vpc_id = module.networking.vpc_id
+  rds_instance_id = module.database.rds_instance_id
+  s3_bucket_name = module.storage.primary_bucket_name
+  ecs_cluster_name = module.compute.ecs_cluster_name
+  
+  # Notification settings
+  notification_email = var.notification_email
+  cost_alert_threshold = 100  # USD per month
+  
+  tags = local.common_tags
+}
+
+# API Gateway for webhooks and external integrations
+resource "aws_api_gateway_rest_api" "main" {
+  name        = "${local.name_prefix}-api"
+  description = "AI Influencer System API"
+  
+  endpoint_configuration {
+    types = ["REGIONAL"]
+  }
+}
+
+# API Gateway method and deployment (placeholder)
+resource "aws_api_gateway_method" "root" {
+  rest_api_id   = aws_api_gateway_rest_api.main.id
+  resource_id   = aws_api_gateway_rest_api.main.root_resource_id
+  http_method   = "GET"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "root" {
+  rest_api_id             = aws_api_gateway_rest_api.main.id
+  resource_id             = aws_api_gateway_rest_api.main.root_resource_id
+  http_method             = aws_api_gateway_method.root.http_method
+  integration_http_method = "GET"
+  type                    = "MOCK"
+  
+  request_templates = {
+    "application/json" = jsonencode({
+      statusCode = 200
+    })
+  }
+}
+
+resource "aws_api_gateway_method_response" "root" {
+  rest_api_id = aws_api_gateway_rest_api.main.id
+  resource_id = aws_api_gateway_rest_api.main.root_resource_id
+  http_method = aws_api_gateway_method.root.http_method
+  status_code = "200"
+}
+
+resource "aws_api_gateway_integration_response" "root" {
+  rest_api_id = aws_api_gateway_rest_api.main.id
+  resource_id = aws_api_gateway_rest_api.main.root_resource_id
+  http_method = aws_api_gateway_method.root.http_method
+  status_code = aws_api_gateway_method_response.root.status_code
+  
+  response_templates = {
+    "application/json" = jsonencode({
+      message = "AI Influencer System API"
+      status  = "healthy"
+    })
+  }
+}
+
+resource "aws_api_gateway_deployment" "main" {
+  depends_on = [
+    aws_api_gateway_method.root,
+    aws_api_gateway_integration.root,
+    aws_api_gateway_method_response.root,
+    aws_api_gateway_integration_response.root
+  ]
+  
+  rest_api_id = aws_api_gateway_rest_api.main.id
+  stage_name  = var.environment
+}
+
+# SQS Queues for parallel processing
+resource "aws_sqs_queue" "image_generation" {
+  count = var.max_characters
+  
+  name = "${local.name_prefix}-character-${count.index + 1}-image-generation"
+  
+  # Dead letter queue configuration
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.image_generation_dlq[count.index].arn
+    maxReceiveCount     = 3
+  })
+  
+  # Message retention
+  message_retention_seconds = 1209600  # 14 days
+  visibility_timeout_seconds = 300     # 5 minutes
+  
+  tags = merge(local.common_tags, {
+    QueueType = "ImageGeneration"
+    Character = "character-${count.index + 1}"
+  })
+}
+
+resource "aws_sqs_queue" "video_generation" {
+  count = var.max_characters
+  
+  name = "${local.name_prefix}-character-${count.index + 1}-video-generation"
+  
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.video_generation_dlq[count.index].arn
+    maxReceiveCount     = 3
+  })
+  
+  message_retention_seconds = 1209600
+  visibility_timeout_seconds = 600  # 10 minutes for video processing
+  
+  tags = merge(local.common_tags, {
+    QueueType = "VideoGeneration"
+    Character = "character-${count.index + 1}"
+  })
+}
+
+resource "aws_sqs_queue" "posting_queue" {
+  count = var.max_characters
+  
+  name = "${local.name_prefix}-character-${count.index + 1}-posting"
+  
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.posting_dlq[count.index].arn
+    maxReceiveCount     = 3
+  })
+  
+  message_retention_seconds = 1209600
+  visibility_timeout_seconds = 180  # 3 minutes for posting
+  
+  tags = merge(local.common_tags, {
+    QueueType = "Posting"
+    Character = "character-${count.index + 1}"
+  })
+}
+
+# Dead Letter Queues
+resource "aws_sqs_queue" "image_generation_dlq" {
+  count = var.max_characters
+  
+  name = "${local.name_prefix}-character-${count.index + 1}-image-generation-dlq"
+  message_retention_seconds = 1209600
+  
+  tags = merge(local.common_tags, {
+    QueueType = "ImageGenerationDLQ"
+    Character = "character-${count.index + 1}"
+  })
+}
+
+resource "aws_sqs_queue" "video_generation_dlq" {
+  count = var.max_characters
+  
+  name = "${local.name_prefix}-character-${count.index + 1}-video-generation-dlq"
+  message_retention_seconds = 1209600
+  
+  tags = merge(local.common_tags, {
+    QueueType = "VideoGenerationDLQ"
+    Character = "character-${count.index + 1}"
+  })
+}
+
+resource "aws_sqs_queue" "posting_dlq" {
+  count = var.max_characters
+  
+  name = "${local.name_prefix}-character-${count.index + 1}-posting-dlq"
+  message_retention_seconds = 1209600
+  
+  tags = merge(local.common_tags, {
+    QueueType = "PostingDLQ"
+    Character = "character-${count.index + 1}"
+  })
+}
+
+# Lambda functions for automation
+resource "aws_lambda_function" "content_scheduler" {
+  filename         = "content_scheduler.zip"
+  function_name    = "${local.name_prefix}-content-scheduler"
+  role            = aws_iam_role.lambda_execution_role.arn
+  handler         = "index.handler"
+  runtime         = "python3.9"
+  timeout         = 300
+  
+  environment {
+    variables = {
+      DATABASE_URL = module.database.connection_string
+      S3_BUCKET   = module.storage.primary_bucket_name
+      SQS_QUEUES  = jsonencode([for i in range(var.max_characters) : {
+        image_queue = aws_sqs_queue.image_generation[i].url
+        video_queue = aws_sqs_queue.video_generation[i].url
+        posting_queue = aws_sqs_queue.posting_queue[i].url
+      }])
+    }
+  }
+  
+  tags = local.common_tags
+}
+
+# IAM roles and policies
+resource "aws_iam_role" "lambda_execution_role" {
+  name = "${local.name_prefix}-lambda-execution-role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "lambda_custom_policy" {
+  name = "${local.name_prefix}-lambda-custom-policy"
+  role = aws_iam_role.lambda_execution_role.id
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes"
+        ]
+        Resource = concat(
+          aws_sqs_queue.image_generation[*].arn,
+          aws_sqs_queue.video_generation[*].arn,
+          aws_sqs_queue.posting_queue[*].arn
+        )
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = [
+          "${module.storage.primary_bucket_arn}",
+          "${module.storage.primary_bucket_arn}/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "rds:DescribeDBInstances"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# CloudWatch Event Rules for scheduling
+resource "aws_cloudwatch_event_rule" "daily_content_generation" {
+  name                = "${local.name_prefix}-daily-content"
+  description         = "Trigger daily content generation"
+  schedule_expression = "cron(0 2 * * ? *)"  # 2 AM daily
+  
+  tags = local.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "lambda_target" {
+  rule      = aws_cloudwatch_event_rule.daily_content_generation.name
+  target_id = "ContentSchedulerTarget"
+  arn       = aws_lambda_function.content_scheduler.arn
+}
+
+resource "aws_lambda_permission" "allow_cloudwatch" {
+  statement_id  = "AllowExecutionFromCloudWatch"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.content_scheduler.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.daily_content_generation.arn
+}
+
+# Outputs
+output "infrastructure_summary" {
+  description = "Summary of deployed infrastructure"
+  value = {
+    vpc_id = module.networking.vpc_id
+    rds_endpoint = module.database.rds_endpoint
+    s3_bucket = module.storage.primary_bucket_name
+    api_gateway_url = "${aws_api_gateway_rest_api.main.execution_arn}/${var.environment}"
+    ecs_cluster = module.compute.ecs_cluster_name
+    cloudwatch_dashboard = module.monitoring.dashboard_url
+  }
+}
+
+output "sqs_queues" {
+  description = "SQS queue URLs for each character"
+  value = {
+    image_generation_queues = aws_sqs_queue.image_generation[*].url
+    video_generation_queues = aws_sqs_queue.video_generation[*].url
+    posting_queues = aws_sqs_queue.posting_queue[*].url
+  }
+}
+
+output "cost_estimation" {
+  description = "Estimated monthly costs"
+  value = {
+    rds_instance = "~$15-30/month"
+    s3_storage = "~$5-20/month (depending on usage)"
+    ecs_fargate = "~$20-100/month (depending on scaling)"
+    lambda_functions = "~$1-10/month"
+    cloudwatch = "~$5-15/month"
+    data_transfer = "~$10-50/month"
+    total_estimated = "~$56-225/month"
+    note = "Costs vary based on usage, spot instance availability, and data transfer"
+  }
+}

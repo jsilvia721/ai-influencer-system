@@ -1,0 +1,48 @@
+# Core ML and AI dependencies
+torch>=2.0.0
+torchvision
+torchaudio
+transformers>=4.30.0
+diffusers>=0.20.0
+accelerate
+xformers
+
+# Image and video processing
+opencv-python
+pillow>=9.0.0
+numpy
+scipy
+
+# Video processing
+moviepy
+ffmpeg-python
+
+# AWS and cloud services
+boto3
+botocore
+
+# API and web framework
+fastapi
+uvicorn
+requests
+httpx
+
+# Data processing
+pandas
+pydantic
+python-multipart
+
+# Utilities
+python-dotenv
+click
+tqdm
+loguru
+pyyaml
+safetensors
+
+# Development and testing
+pytest
+pytest-asyncio
+black
+flake8
+mypy
