@@ -822,7 +822,8 @@ def handle_generate_content(request_data: Dict[str, Any]):
             payload = {
                 'action': action,
                 'character_id': request_data.get('character_id'),
-                'prompt': request_data.get('image_prompt', request_data.get('prompt', ''))
+                'prompt': request_data.get('image_prompt', request_data.get('prompt', '')),
+                'num_images': request_data.get('num_images', 1)  # Support multiple images
             }
         elif mode == 'video_only':
             action = 'generate_video'

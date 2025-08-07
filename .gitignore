@@ -88,3 +88,5 @@ payload.b64
 # Temporary files
 *.tmp
 *.temp
+
+# Separate repositories

@@ -1,8 +1,8 @@
 """
-AWS Lambda function for generating training images with robust retry mechanism
+AWS Lambda function for generating training images using Replicate's Flux 1.1 Pro with Webhooks
 
-This function generates a precise number of training images by retrying failed generations
-up to a maximum number of attempts, providing real-time progress updates.
+This function generates diverse training images for characters using AI image generation,
+with webhooks for real-time status updates instead of polling.
 """
 
 import json
@@ -38,7 +38,7 @@ def get_secret(secret_name: str) -> Optional[str]:
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    AWS Lambda handler for training image generation with retry mechanism
+    AWS Lambda handler for training image generation using webhooks
     """
     print(f"Received event: {json.dumps(event)}")
     
@@ -80,11 +80,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         job_id = event.get('job_id', str(uuid.uuid4()))
         folder_id = character_id if character_id else job_id
         
-        # Calculate max attempts: num_images * 2 + 3, capped at 25
-        max_attempts = min(num_images * 2 + 3, 25)
-        
         print(f"Starting training image generation for character: {character_name}")
-        print(f"Target: {num_images} images, Max attempts: {max_attempts}")
+        print(f"Target: {num_images} images")
         print(f"Job ID: {job_id}")
         
         # Store initial job status in DynamoDB
@@ -97,9 +94,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'total_images': num_images,
             'completed_images': 0,
             'current_attempt': 0,
-            'max_attempts': max_attempts,
+            'max_attempts': min(num_images * 2 + 3, 25),
             'success_rate': Decimal('0.0'),
             'image_urls': [],
+            'replicate_predictions': [],  # Store prediction IDs for webhook tracking
             'created_at': datetime.now(timezone.utc).isoformat(),
             'updated_at': datetime.now(timezone.utc).isoformat()
         }
@@ -110,15 +108,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         except Exception as e:
             print(f"Warning: Could not store job in DynamoDB: {e}")
         
-        # Start the image generation process
-        result = generate_training_images_with_retry(
+        # Start the image generation process with webhooks
+        result = generate_training_images_with_webhooks(
             api_token=api_token,
             job_id=job_id,
             character_name=character_name,
             character_description=character_description,
             folder_id=folder_id,
             num_images=num_images,
-            max_attempts=max_attempts,
             table=table
         )
         
@@ -126,14 +123,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'statusCode': 200,
             'body': json.dumps({
                 'job_id': job_id,
-                'status': result['status'],
-                'message': f'Training image generation process started for {character_name}',
+                'status': 'processing',
+                'message': f'Training image generation started for {character_name}',
                 'total_requested': num_images,
-                'max_attempts': max_attempts,
-                'current_attempt': result.get('current_attempt', 0),
-                'completed_images': result.get('completed_images', 0),
-                'success_rate': float(result.get('success_rate', 0)),
-                'image_urls': result.get('image_urls', [])
+                'webhook_enabled': True,
+                'predictions_submitted': result.get('predictions_submitted', 0),
+                'real_time_updates': 'enabled'
             })
         }
         
@@ -146,19 +141,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             })
         }
 
-def generate_training_images_with_retry(
+def generate_training_images_with_webhooks(
     api_token: str,
     job_id: str,
     character_name: str,
     character_description: str,
     folder_id: str,
     num_images: int,
-    max_attempts: int,
     table
 ) -> Dict[str, Any]:
     """
-    Generate training images with retry mechanism.
-    Continues until num_images are successfully generated or max_attempts is reached.
+    Generate training images using webhooks for real-time updates.
+    Submits all predictions at once with webhook URLs.
     """
     
     # Define varied prompts for training images
@@ -189,103 +183,93 @@ def generate_training_images_with_retry(
         f"{character_description} bedroom setting, cozy aesthetic, soft morning light, intimate lifestyle content"
     ]
     
-    successful_images = []
-    current_attempt = 0
-    prompts_cycle = all_prompts * ((num_images // len(all_prompts)) + 1)  # Ensure we have enough prompts
+    # Use the requested number of prompts (cycle if needed)
+    prompts = []
+    for i in range(num_images):
+        prompts.append(all_prompts[i % len(all_prompts)])
     
-    while len(successful_images) < num_images and current_attempt < max_attempts:
-        current_attempt += 1
-        
-        # Select prompt (cycle through available prompts)
-        prompt_index = (current_attempt - 1) % len(all_prompts)
-        prompt = prompts_cycle[prompt_index]
-        
-        print(f"Attempt {current_attempt}/{max_attempts}: Generating image {len(successful_images)+1}/{num_images}")
-        print(f"Prompt: {prompt[:100]}...")
-        
+    # Submit all predictions with webhook URLs
+    prediction_ids = []
+    successful_submissions = 0
+    
+    # Get the webhook URL - this should be configured in your API Gateway
+    webhook_url = get_webhook_url()
+    
+    for i, prompt in enumerate(prompts, 1):
         try:
-            # Generate image using Replicate
-            image_url = generate_single_image_with_replicate(api_token, prompt)
+            print(f"Submitting prediction {i}/{num_images}: {prompt[:100]}...")
             
-            if image_url:
-                # Download and upload to S3
-                image_number = len(successful_images) + 1
-                s3_key = f"training-images/{folder_id}/{character_name.replace(' ', '_')}_training_{image_number:02d}.jpg"
-                s3_url = upload_image_to_s3(image_url, s3_key)
-                
-                if s3_url:
-                    successful_images.append(s3_url)
-                    print(f"Successfully generated and stored image {image_number}/{num_images}")
-                else:
-                    print(f"Failed to upload image to S3 (attempt {current_attempt})")
-            else:
-                print(f"Failed to generate image with Replicate (attempt {current_attempt})")
-        
-        except Exception as e:
-            print(f"Error in attempt {current_attempt}: {str(e)}")
-        
-        # Calculate success rate
-        success_rate = (len(successful_images) / current_attempt) * 100 if current_attempt > 0 else 0
-        
-        # Update progress in DynamoDB
-        try:
-            table.update_item(
-                Key={'job_id': job_id},
-                UpdateExpression='SET completed_images = :completed, current_attempt = :attempt, success_rate = :rate, image_urls = :urls, updated_at = :updated',
-                ExpressionAttributeValues={
-                    ':completed': len(successful_images),
-                    ':attempt': current_attempt,
-                    ':rate': Decimal(str(round(success_rate, 2))),
-                    ':urls': successful_images,
-                    ':updated': datetime.now(timezone.utc).isoformat()
-                }
+            prediction_id = submit_prediction_with_webhook(
+                api_token=api_token,
+                prompt=prompt,
+                webhook_url=webhook_url,
+                job_id=job_id,
+                image_index=i
             )
-        except Exception as e:
-            print(f"Warning: Could not update progress in DynamoDB: {e}")
+            
+            if prediction_id:
+                prediction_ids.append({
+                    'prediction_id': prediction_id,
+                    'image_index': i,
+                    'prompt': prompt,
+                    'status': 'submitted',
+                    'submitted_at': datetime.now(timezone.utc).isoformat()
+                })
+                successful_submissions += 1
+                print(f"Successfully submitted prediction {i}/{num_images}: {prediction_id}")
+            else:
+                print(f"Failed to submit prediction {i}/{num_images}")
         
-        # Small delay between attempts
-        if current_attempt < max_attempts and len(successful_images) < num_images:
-            time.sleep(2)
+        except Exception as e:
+            print(f"Error submitting prediction {i}: {str(e)}")
     
-    # Determine final status
-    final_status = 'completed' if len(successful_images) >= num_images else 'completed'  # Always completed, may have partial results
-    success_rate = (len(successful_images) / current_attempt) * 100 if current_attempt > 0 else 0
-    
-    # Final update to DynamoDB
+    # Update job with prediction IDs
     try:
         table.update_item(
             Key={'job_id': job_id},
-            UpdateExpression='SET #status = :status, completed_images = :completed, current_attempt = :attempt, success_rate = :rate, image_urls = :urls, updated_at = :updated',
-            ExpressionAttributeNames={'#status': 'status'},
+            UpdateExpression='SET replicate_predictions = :predictions, current_attempt = :attempt, updated_at = :updated',
             ExpressionAttributeValues={
-                ':status': final_status,
-                ':completed': len(successful_images),
-                ':attempt': current_attempt,
-                ':rate': Decimal(str(round(success_rate, 2))),
-                ':urls': successful_images,
+                ':predictions': prediction_ids,
+                ':attempt': successful_submissions,
                 ':updated': datetime.now(timezone.utc).isoformat()
             }
         )
     except Exception as e:
-        print(f"Warning: Could not update final status in DynamoDB: {e}")
+        print(f"Warning: Could not update predictions in DynamoDB: {e}")
     
-    print(f"Job {job_id} completed: Generated {len(successful_images)}/{num_images} images in {current_attempt} attempts (success rate: {success_rate:.1f}%)")
+    print(f"Job {job_id}: Submitted {successful_submissions}/{num_images} predictions for webhook processing")
     
     return {
-        'status': final_status,
-        'completed_images': len(successful_images),
-        'current_attempt': current_attempt,
-        'success_rate': success_rate,
-        'image_urls': successful_images
+        'predictions_submitted': successful_submissions,
+        'prediction_ids': [p['prediction_id'] for p in prediction_ids],
+        'status': 'processing'
     }
 
-def generate_single_image_with_replicate(api_token: str, prompt: str) -> Optional[str]:
-    """Generate a single image using Replicate's Flux Dev model"""
+def get_webhook_url() -> str:
+    """Get the webhook URL for Replicate callbacks"""
+    # This should be your API Gateway URL + webhook endpoint
+    # Format: https://your-api-gateway-id.execute-api.region.amazonaws.com/stage/replicate-webhook
+    
+    # You can set this as an environment variable or construct it
+    api_gateway_url = os.environ.get('API_GATEWAY_URL', 'https://9fkbuxy8g6.execute-api.us-east-1.amazonaws.com/dev')
+    return f"{api_gateway_url}/replicate-webhook"
+
+def submit_prediction_with_webhook(
+    api_token: str,
+    prompt: str,
+    webhook_url: str,
+    job_id: str,
+    image_index: int
+) -> Optional[str]:
+    """Submit a single prediction with webhook URL to Replicate"""
     try:
         headers = {
             'Authorization': f'Token {api_token}',
             'Content-Type': 'application/json'
         }
+        
+        # Encode metadata in webhook URL as query parameters since metadata field is not allowed
+        webhook_url_with_params = f"{webhook_url}?job_id={job_id}&image_index={image_index}"
         
         payload = json.dumps({
             'version': 'black-forest-labs/flux-dev',
@@ -298,7 +282,9 @@ def generate_single_image_with_replicate(api_token: str, prompt: str) -> Optiona
                 'guidance_scale': 3.5,
                 'num_outputs': 1,
                 'disable_safety_checker': False
-            }
+            },
+            'webhook': webhook_url_with_params,
+            'webhook_events_filter': ['start', 'completed']
         })
         
         # Submit prediction request
@@ -316,54 +302,11 @@ def generate_single_image_with_replicate(api_token: str, prompt: str) -> Optiona
         prediction_data = json.loads(response.data.decode('utf-8'))
         prediction_id = prediction_data['id']
         
-        # Poll for completion
-        max_wait_time = 120  # 2 minutes max wait
-        poll_interval = 5    # Poll every 5 seconds
-        elapsed_time = 0
-        
-        while elapsed_time < max_wait_time:
-            status_response = http.request(
-                'GET',
-                f'https://api.replicate.com/v1/predictions/{prediction_id}',
-                headers=headers
-            )
-            
-            if status_response.status == 200:
-                status_data = json.loads(status_response.data.decode('utf-8'))
-                status = status_data.get('status')
-                
-                if status == 'succeeded':
-                    output = status_data.get('output')
-                    if output and isinstance(output, list) and len(output) > 0:
-                        return output[0]  # Return first generated image URL
-                    elif isinstance(output, str):
-                        return output  # Direct URL
-                    else:
-                        print(f"Unexpected output format: {output}")
-                        return None
-                        
-                elif status == 'failed':
-                    error = status_data.get('error', 'Unknown error')
-                    print(f"Image generation failed: {error}")
-                    return None
-                    
-                elif status in ['starting', 'processing']:
-                    print(f"Generation in progress... ({elapsed_time}s elapsed)")
-                    time.sleep(poll_interval)
-                    elapsed_time += poll_interval
-                    continue
-                else:
-                    print(f"Unknown status: {status}")
-                    return None
-            else:
-                print(f"Error checking status: {status_response.status}")
-                return None
-        
-        print(f"Timeout waiting for image generation (>{max_wait_time}s)")
-        return None
+        print(f"Successfully submitted prediction {prediction_id} with webhook {webhook_url}")
+        return prediction_id
         
     except Exception as e:
-        print(f"Error in generate_single_image_with_replicate: {str(e)}")
+        print(f"Error in submit_prediction_with_webhook: {str(e)}")
         return None
 
 def upload_image_to_s3(image_url: str, s3_key: str) -> Optional[str]:

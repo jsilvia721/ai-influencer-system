@@ -1,0 +1,9 @@
+{
+    "Variables": {
+        "CONTENT_JOBS_TABLE_NAME": "ai-influencer-content-jobs",
+        "CHARACTERS_TABLE_NAME": "ai-influencer-characters", 
+        "TRAINING_JOBS_TABLE_NAME": "ai-influencer-training-jobs",
+        "S3_BUCKET_NAME": "ai-influencer-system-dev-content-bkdeyg",
+        "REPLICATE_WEBHOOK_SECRET": "replicate-webhook-secret"
+    }
+}

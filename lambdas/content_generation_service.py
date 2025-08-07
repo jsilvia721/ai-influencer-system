@@ -86,12 +86,13 @@ def lambda_handler(event, context):
         }
 
 def handle_generate_image(body, context):
-    """Generate a consistent character image using LoRA model"""
+    """Generate consistent character images using LoRA model with retry logic"""
     
     try:
         # Required parameters
         character_id = body.get('character_id')
         prompt = body.get('prompt', '')
+        num_images = body.get('num_images', 1)  # Number of images to generate
         
         if not character_id:
             return {
@@ -99,6 +100,12 @@ def handle_generate_image(body, context):
                 'headers': {'Content-Type': 'application/json'},
                 'body': json.dumps({'error': 'character_id is required'})
             }
+        
+        # Validate and constrain num_images
+        if not isinstance(num_images, int) or num_images < 1:
+            num_images = 1
+        elif num_images > 10:  # Limit to prevent excessive API usage
+            num_images = 10
         
         # Get character details and LoRA model info
         characters_table = dynamodb.Table(CHARACTERS_TABLE_NAME)
@@ -122,7 +129,11 @@ def handle_generate_image(body, context):
                 'body': json.dumps({'error': 'Character LoRA model not trained yet. Please complete training first.'})
             }
         
-        # Create job record
+        # Calculate retry threshold based on requested images
+        # Base attempts: 2x the number of requested images + 3 extra attempts
+        max_attempts = min(num_images * 2 + 3, 25)  # Cap at 25 attempts
+        
+        # Create job record with multi-image tracking
         job_id = str(uuid.uuid4())
         job = {
             'job_id': job_id,
@@ -133,77 +144,109 @@ def handle_generate_image(body, context):
             'prompt': prompt,
             'trigger_word': trigger_word,
             'lora_model_url': lora_model_url,
+            'num_images_requested': num_images,
+            'num_images_generated': 0,
+            'max_attempts': max_attempts,
+            'current_attempt': 0,
+            'generated_images': [],  # List of successful image URLs
             'created_at': datetime.now(timezone.utc).isoformat(),
             'updated_at': datetime.now(timezone.utc).isoformat()
         }
         
-        # Save job to DynamoDB
+        # Save initial job to DynamoDB
         content_jobs_table = dynamodb.Table(CONTENT_JOBS_TABLE_NAME)
         content_jobs_table.put_item(Item=job)
         
-        # Generate image using LoRA model on Replicate
-        result = generate_image_with_lora(lora_model_url, trigger_word, prompt, job_id)
-        
-        # Check if webhook is configured for async processing
+        # Check if webhook is configured
         webhook_url = os.environ.get('REPLICATE_WEBHOOK_URL')
         
-        if result and isinstance(result, dict) and result.get('prediction_id') and webhook_url:
-            # Async processing with webhooks
-            job.update({
-                'status': 'processing',
-                'replicate_prediction_id': result['prediction_id'],
-                'updated_at': datetime.now(timezone.utc).isoformat()
-            })
-            content_jobs_table.put_item(Item=job)
+        if webhook_url:
+            # For async processing, start the first image generation
+            result = generate_image_with_lora_batch(lora_model_url, trigger_word, prompt, job_id, num_images, max_attempts)
             
-            return {
-                'statusCode': 200,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({
-                    'job_id': job_id,
+            if result and result.get('started'):
+                # Update job status to processing
+                job.update({
                     'status': 'processing',
-                    'type': 'image',
-                    'character_id': character_id,
-                    'prompt': prompt,
-                    'message': 'Image generation started, check status for updates'
-                }, default=decimal_default)
-            }
-        elif result and isinstance(result, str):
-            # Synchronous result (backward compatibility)
-            job.update({
-                'status': 'completed',
-                'output_url': result,
-                'completed_at': datetime.now(timezone.utc).isoformat(),
-                'updated_at': datetime.now(timezone.utc).isoformat()
-            })
-            content_jobs_table.put_item(Item=job)
-            
-            return {
-                'statusCode': 200,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({
-                    'job_id': job_id,
-                    'status': 'completed',
-                    'type': 'image',
-                    'output_url': result,
-                    'character_id': character_id,
-                    'prompt': prompt
-                }, default=decimal_default)
-            }
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                })
+                content_jobs_table.put_item(Item=job)
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': json.dumps({
+                        'job_id': job_id,
+                        'status': 'processing',
+                        'type': 'image',
+                        'character_id': character_id,
+                        'prompt': prompt,
+                        'num_images_requested': num_images,
+                        'max_attempts': max_attempts,
+                        'message': f'Multi-image generation started for {num_images} images with up to {max_attempts} attempts'
+                    }, default=decimal_default)
+                }
+            else:
+                # Failed to start generation
+                job.update({
+                    'status': 'failed',
+                    'error': 'Failed to start image generation',
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                })
+                content_jobs_table.put_item(Item=job)
+                
+                return {
+                    'statusCode': 500,
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': json.dumps({'error': 'Failed to start image generation'})
+                }
         else:
-            # Update job as failed
-            job.update({
-                'status': 'failed',
-                'error': 'Failed to generate image',
-                'updated_at': datetime.now(timezone.utc).isoformat()
-            })
-            content_jobs_table.put_item(Item=job)
+            # Synchronous processing (backward compatibility)
+            result = generate_image_with_lora(lora_model_url, trigger_word, prompt)
             
-            return {
-                'statusCode': 500,
-                'headers': {'Content-Type': 'application/json'},
-                'body': json.dumps({'error': 'Failed to generate image'})
-            }
+            if result and isinstance(result, str):
+                job.update({
+                    'status': 'completed',
+                    'output_url': result,
+                    'num_images_generated': 1,
+                    'current_attempt': 1,
+                    'generated_images': [result],
+                    'success_rate': 100.0,
+                    'completed_at': datetime.now(timezone.utc).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                })
+                content_jobs_table.put_item(Item=job)
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': json.dumps({
+                        'job_id': job_id,
+                        'status': 'completed',
+                        'type': 'image',
+                        'output_url': result,
+                        'character_id': character_id,
+                        'prompt': prompt,
+                        'num_images_requested': num_images,
+                        'num_images_generated': 1,
+                        'success_rate': 100.0
+                    }, default=decimal_default)
+                }
+            else:
+                job.update({
+                    'status': 'failed',
+                    'error': 'Failed to generate image',
+                    'current_attempt': 1,
+                    'success_rate': 0.0,
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                })
+                content_jobs_table.put_item(Item=job)
+                
+                return {
+                    'statusCode': 500,
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': json.dumps({'error': 'Failed to generate image'})
+                }
             
     except Exception as e:
         print(f"Error in handle_generate_image: {str(e)}")
@@ -467,6 +510,320 @@ def handle_generate_complete_content(body, context):
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({'error': f'Complete content generation failed: {str(e)}'})
         }
+
+def generate_image_with_lora_batch(lora_model_url, trigger_word, prompt, job_id, num_images, max_attempts):
+    """Generate multiple images using LoRA model with retry logic and webhook support"""
+    
+    try:
+        api_token = get_secret(REPLICATE_API_TOKEN_SECRET)
+        if not api_token:
+            print("Replicate API token not available")
+            return None
+        
+        content_jobs_table = dynamodb.Table(CONTENT_JOBS_TABLE_NAME)
+        
+        # Track generation progress
+        generated_images = []
+        attempt_count = 0
+        
+        # Build prompt with trigger word
+        full_prompt = f"{trigger_word}, {prompt}" if prompt else trigger_word
+        
+        webhook_url = os.environ.get('REPLICATE_WEBHOOK_URL')
+        
+        print(f"Starting batch image generation for job {job_id}: {num_images} images, max {max_attempts} attempts")
+        
+        # Start the first image generation
+        attempt_count += 1
+        result = start_single_image_generation(lora_model_url, full_prompt, job_id, attempt_count, webhook_url)
+        
+        if result and result.get('prediction_id'):
+            # Update job with initial prediction ID and progress
+            content_jobs_table.update_item(
+                Key={'job_id': job_id},
+                UpdateExpression="SET current_attempt = :attempt, replicate_prediction_id = :pred_id, updated_at = :updated",
+                ExpressionAttributeValues={
+                    ':attempt': attempt_count,
+                    ':pred_id': result['prediction_id'],
+                    ':updated': datetime.now(timezone.utc).isoformat()
+                }
+            )
+            
+            return {'started': True, 'prediction_id': result['prediction_id']}
+        else:
+            print(f"Failed to start first image generation for job {job_id}")
+            return None
+            
+    except Exception as e:
+        print(f"Error in generate_image_with_lora_batch: {str(e)}")
+        return None
+
+def start_single_image_generation(lora_model_url, full_prompt, job_id, attempt_number, webhook_url):
+    """Start a single image generation attempt"""
+    
+    try:
+        api_token = get_secret(REPLICATE_API_TOKEN_SECRET)
+        if not api_token:
+            return None
+        
+        # Use the trained LoRA model directly via Replicate
+        payload = {
+            'input': {
+                'prompt': full_prompt,
+                'num_outputs': 1,
+                'aspect_ratio': '9:16',  # Good for social media
+                'output_format': 'jpg',
+                'guidance_scale': 3.5,
+                'num_inference_steps': 28
+            }
+        }
+        
+        # Add webhook with job info
+        if webhook_url:
+            payload['webhook'] = f"{webhook_url}?job_id={job_id}&type=image&attempt={attempt_number}"
+            payload['webhook_events_filter'] = ['start', 'completed']
+        
+        # Extract model path from lora_model_url (format: owner/model:version)
+        if ':' in lora_model_url:
+            model_path = lora_model_url.split(':')[0]  # Get owner/model part
+        else:
+            # Fallback if no version specified
+            model_path = lora_model_url
+        
+        headers = {
+            'Authorization': f'Token {api_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Use version-specific endpoint for trained models
+        version_id = lora_model_url.split(':')[1] if ':' in lora_model_url else lora_model_url
+        api_url = f'https://api.replicate.com/v1/models/{model_path}/versions/{version_id}/predictions'
+        
+        print(f"Starting image generation attempt {attempt_number} for job {job_id}")
+        
+        response = http.request(
+            'POST',
+            api_url,
+            body=json.dumps(payload),
+            headers=headers
+        )
+        
+        if response.status == 201:
+            prediction_data = json.loads(response.data.decode('utf-8'))
+            prediction_id = prediction_data['id']
+            
+            print(f"Image generation attempt {attempt_number} started with prediction ID: {prediction_id}")
+            return {'prediction_id': prediction_id, 'status': 'started'}
+        else:
+            error_body = response.data.decode('utf-8') if response.data else 'No response body'
+            print(f"Failed to start image generation attempt {attempt_number}: {response.status} - {error_body}")
+            return None
+            
+    except Exception as e:
+        print(f"Error in start_single_image_generation: {str(e)}")
+        return None
+
+def handle_image_generation_webhook(job_id, prediction_status, prediction_output, attempt_number):
+    """Handle webhook response for image generation with retry logic"""
+    
+    try:
+        content_jobs_table = dynamodb.Table(CONTENT_JOBS_TABLE_NAME)
+        
+        # Get current job status
+        job_response = content_jobs_table.get_item(Key={'job_id': job_id})
+        if 'Item' not in job_response:
+            print(f"Job {job_id} not found for webhook processing")
+            return
+        
+        job = job_response['Item']
+        num_images_requested = int(job.get('num_images_requested', 1))
+        max_attempts = int(job.get('max_attempts', 5))
+        current_generated = job.get('generated_images', [])
+        current_attempt = int(job.get('current_attempt', 0))
+        
+        if prediction_status == 'succeeded' and prediction_output:
+            # Successfully generated an image
+            if isinstance(prediction_output, list) and len(prediction_output) > 0:
+                image_url = prediction_output[0]
+            elif isinstance(prediction_output, str):
+                image_url = prediction_output
+            else:
+                image_url = str(prediction_output)
+            
+            # Add the new image to our collection
+            current_generated.append(image_url)
+            num_generated = len(current_generated)
+            
+            print(f"Job {job_id}: Successfully generated image {num_generated}/{num_images_requested} (attempt {attempt_number})")
+            
+            # Calculate success rate
+            success_rate = (num_generated / current_attempt) * 100 if current_attempt > 0 else 0
+            
+            if num_generated >= num_images_requested:
+                # We've reached our target!
+                job.update({
+                    'status': 'completed',
+                    'num_images_generated': num_generated,
+                    'generated_images': current_generated,
+                    'output_url': current_generated[0],  # Primary image for backward compatibility
+                    'success_rate': success_rate,
+                    'completed_at': datetime.now(timezone.utc).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                })
+                content_jobs_table.put_item(Item=job)
+                print(f"Job {job_id} completed with {num_generated} images (success rate: {success_rate:.1f}%)")
+                return
+            
+            # Need more images, but check if we have attempts left
+            if current_attempt >= max_attempts:
+                # Out of attempts, complete with what we have
+                job.update({
+                    'status': 'completed',
+                    'num_images_generated': num_generated,
+                    'generated_images': current_generated,
+                    'output_url': current_generated[0],  # Primary image for backward compatibility
+                    'success_rate': success_rate,
+                    'completed_at': datetime.now(timezone.utc).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat(),
+                    'note': f'Reached max attempts ({max_attempts}). Generated {num_generated}/{num_images_requested} images.'
+                })
+                content_jobs_table.put_item(Item=job)
+                print(f"Job {job_id} completed with {num_generated}/{num_images_requested} images after {current_attempt} attempts (success rate: {success_rate:.1f}%)")
+                return
+            
+            # Update progress and start next attempt
+            job.update({
+                'num_images_generated': num_generated,
+                'generated_images': current_generated,
+                'success_rate': success_rate,
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            })
+            content_jobs_table.put_item(Item=job)
+            
+            # Start the next generation attempt
+            next_attempt = current_attempt + 1
+            full_prompt = f"{job.get('trigger_word', '')}, {job.get('prompt', '')}"
+            webhook_url = os.environ.get('REPLICATE_WEBHOOK_URL')
+            
+            result = start_single_image_generation(
+                job.get('lora_model_url'), 
+                full_prompt, 
+                job_id, 
+                next_attempt, 
+                webhook_url
+            )
+            
+            if result and result.get('prediction_id'):
+                content_jobs_table.update_item(
+                    Key={'job_id': job_id},
+                    UpdateExpression="SET current_attempt = :attempt, replicate_prediction_id = :pred_id, updated_at = :updated",
+                    ExpressionAttributeValues={
+                        ':attempt': next_attempt,
+                        ':pred_id': result['prediction_id'],
+                        ':updated': datetime.now(timezone.utc).isoformat()
+                    }
+                )
+                print(f"Job {job_id}: Started attempt {next_attempt} for image {num_generated + 1}/{num_images_requested}")
+            else:
+                # Failed to start next attempt, complete with what we have
+                job.update({
+                    'status': 'completed',
+                    'num_images_generated': num_generated,
+                    'generated_images': current_generated,
+                    'output_url': current_generated[0],
+                    'success_rate': success_rate,
+                    'completed_at': datetime.now(timezone.utc).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat(),
+                    'note': f'Failed to start attempt {next_attempt}. Completed with {num_generated} images.'
+                })
+                content_jobs_table.put_item(Item=job)
+                print(f"Job {job_id} completed with {num_generated} images after failing to start next attempt")
+            
+        elif prediction_status == 'failed':
+            # This attempt failed, try again if we have attempts left
+            print(f"Job {job_id}: Attempt {attempt_number} failed")
+            
+            num_generated = len(current_generated)
+            success_rate = (num_generated / current_attempt) * 100 if current_attempt > 0 else 0
+            
+            if current_attempt >= max_attempts:
+                # Out of attempts
+                if num_generated > 0:
+                    # Complete with what we have
+                    job.update({
+                        'status': 'completed',
+                        'num_images_generated': num_generated,
+                        'generated_images': current_generated,
+                        'output_url': current_generated[0],
+                        'success_rate': success_rate,
+                        'completed_at': datetime.now(timezone.utc).isoformat(),
+                        'updated_at': datetime.now(timezone.utc).isoformat(),
+                        'note': f'Reached max attempts ({max_attempts}). Generated {num_generated}/{num_images_requested} images.'
+                    })
+                    print(f"Job {job_id} completed with {num_generated}/{num_images_requested} images after max attempts")
+                else:
+                    # No images generated, mark as failed
+                    job.update({
+                        'status': 'failed',
+                        'error': f'Failed to generate any images after {max_attempts} attempts',
+                        'success_rate': 0.0,
+                        'updated_at': datetime.now(timezone.utc).isoformat()
+                    })
+                    print(f"Job {job_id} failed - no images generated after {max_attempts} attempts")
+                content_jobs_table.put_item(Item=job)
+                return
+            
+            # Try again
+            next_attempt = current_attempt + 1
+            full_prompt = f"{job.get('trigger_word', '')}, {job.get('prompt', '')}"
+            webhook_url = os.environ.get('REPLICATE_WEBHOOK_URL')
+            
+            result = start_single_image_generation(
+                job.get('lora_model_url'), 
+                full_prompt, 
+                job_id, 
+                next_attempt, 
+                webhook_url
+            )
+            
+            if result and result.get('prediction_id'):
+                content_jobs_table.update_item(
+                    Key={'job_id': job_id},
+                    UpdateExpression="SET current_attempt = :attempt, replicate_prediction_id = :pred_id, success_rate = :rate, updated_at = :updated",
+                    ExpressionAttributeValues={
+                        ':attempt': next_attempt,
+                        ':pred_id': result['prediction_id'],
+                        ':rate': Decimal(str(success_rate)),
+                        ':updated': datetime.now(timezone.utc).isoformat()
+                    }
+                )
+                print(f"Job {job_id}: Retrying with attempt {next_attempt} after failure")
+            else:
+                # Failed to start retry
+                if num_generated > 0:
+                    job.update({
+                        'status': 'completed',
+                        'num_images_generated': num_generated,
+                        'generated_images': current_generated,
+                        'output_url': current_generated[0],
+                        'success_rate': success_rate,
+                        'completed_at': datetime.now(timezone.utc).isoformat(),
+                        'updated_at': datetime.now(timezone.utc).isoformat(),
+                        'note': 'Failed to retry after error. Completed with partial results.'
+                    })
+                    print(f"Job {job_id} completed with {num_generated} images after retry failure")
+                else:
+                    job.update({
+                        'status': 'failed',
+                        'error': 'Failed to generate images and could not retry',
+                        'success_rate': 0.0,
+                        'updated_at': datetime.now(timezone.utc).isoformat()
+                    })
+                    print(f"Job {job_id} failed - could not retry after failure")
+                content_jobs_table.put_item(Item=job)
+        
+    except Exception as e:
+        print(f"Error handling image generation webhook for job {job_id}: {str(e)}")
 
 def generate_image_with_lora(lora_model_url, trigger_word, prompt, job_id=None):
     """Generate image using trained LoRA model on Replicate with webhook support"""

@@ -179,18 +179,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             webhook_data=webhook_data
         )
         
-        # Ensure result is JSON serializable by converting any Decimal values to float
-        def convert_decimals(obj):
-            if isinstance(obj, dict):
-                return {k: convert_decimals(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_decimals(item) for item in obj]
-            elif isinstance(obj, Decimal):
-                return float(obj)
-            return obj
-        
-        json_safe_result = convert_decimals(result)
-        
         return {
             'statusCode': 200,
             'headers': {'Content-Type': 'application/json'},
@@ -199,7 +187,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 'job_id': job_id,
                 'prediction_id': prediction_id,
                 'status': status,
-                'processed': json_safe_result
+                'processed': result
             })
         }
         

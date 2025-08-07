@@ -379,22 +379,44 @@ def handle_get_job_status(job_id: str):
             }
         
         job = response['Item']
+        
+        # Helper function to convert Decimal types to native Python types for JSON serialization
+        import decimal
+        def convert_decimals(obj):
+            if isinstance(obj, dict):
+                return {k: convert_decimals(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_decimals(item) for item in obj]
+            elif isinstance(obj, decimal.Decimal):
+                return float(obj)
+            return obj
+        
+        # Return all relevant job data, ensuring Decimals are converted to floats
+        job_data = {
+            'job_id': job['job_id'],
+            'character_name': job.get('character_name', ''),
+            'status': job.get('status', 'processing'),
+            'total_images': job.get('total_images', 0),
+            'completed_images': job.get('completed_images', 0),
+            'current_attempt': job.get('current_attempt', 0),
+            'max_attempts': job.get('max_attempts', 0),
+            'success_rate': job.get('success_rate', 0),
+            'image_urls': job.get('image_urls', []),
+            'replicate_predictions': job.get('replicate_predictions', []),
+            'created_at': job.get('created_at', ''),
+            'updated_at': job.get('updated_at', '')
+        }
+        
+        # Convert any Decimal values to floats
+        json_safe_data = convert_decimals(job_data)
+        
         return {
             'statusCode': 200,
             'headers': {
                 'Content-Type': 'application/json',
                 'Access-Control-Allow-Origin': '*'
             },
-            'body': json.dumps({
-                'data': {
-                    'job_id': job['job_id'],
-                    'character_name': job['character_name'],
-                    'status': job['status'],
-                    'total_images': job.get('total_images', 0),
-                    'completed_images': job.get('completed_images', 0),
-                    'image_urls': job.get('image_urls', [])
-                }
-            })
+            'body': json.dumps(json_safe_data)
         }
         
     except Exception as e:

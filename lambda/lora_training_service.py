@@ -268,6 +268,9 @@ def handle_training_request(body, context):
                 
                 training_jobs_table.put_item(Item=training_job)
                 
+                # Update character training status to 'training'
+                update_character_training_status(character_id, 'training')
+                
                 print(f"LoRA training started successfully: {replicate_id}")
                 
                 return {
@@ -386,6 +389,9 @@ def handle_status_check(body, context):
                                 'training_completed_at': datetime.now(timezone.utc).isoformat()
                             })
                             
+                            # Update character training status to 'completed'
+                            update_character_training_status(job['character_id'], 'completed')
+                            
                         elif replicate_status == 'failed':
                             job.update({
                                 'status': 'failed',
@@ -393,6 +399,9 @@ def handle_status_check(body, context):
                                 'error': prediction_data.get('error', 'Training failed on Replicate'),
                                 'updated_at': datetime.now(timezone.utc).isoformat()
                             })
+                            
+                            # Update character training status to 'failed'
+                            update_character_training_status(job['character_id'], 'failed')
                         
                         elif replicate_status in ['starting', 'processing']:
                             job.update({
@@ -400,6 +409,9 @@ def handle_status_check(body, context):
                                 'replicate_status': replicate_status,
                                 'updated_at': datetime.now(timezone.utc).isoformat()
                             })
+                            
+                            # Update character training status to 'training'
+                            update_character_training_status(job['character_id'], 'training')
                         
                         # Save updated job
                         training_jobs_table.put_item(Item=job)
@@ -622,6 +634,26 @@ def update_character_with_lora_model(character_id, lora_info):
         
     except Exception as e:
         print(f"Error updating character with LoRA model: {str(e)}")
+
+def update_character_training_status(character_id, status):
+    """Update character training status in the main character record"""
+    
+    try:
+        characters_table = dynamodb.Table(CHARACTERS_TABLE_NAME)
+        
+        characters_table.update_item(
+            Key={'id': character_id},
+            UpdateExpression="SET training_status = :status, updated_at = :updated",
+            ExpressionAttributeValues={
+                ':status': status,
+                ':updated': datetime.now(timezone.utc).isoformat()
+            }
+        )
+        
+        print(f"Updated character {character_id} training status to {status}")
+        
+    except Exception as e:
+        print(f"Error updating character training status: {str(e)}")
 
 # Ensure DynamoDB tables exist
 def ensure_tables_exist():
